@@ -6,27 +6,19 @@ MCU-based digital inclinometer
 
 ## Repository structure
 
+```shell
 ├── 3mf
-
 │   ├── back.3mf // back cover for the enclosure
-
 │   ├── body.3mf // enclosure body
-
 │   ├── gyro-support.3mf // support that goes between the display and the gyroscope
-
 │   ├── mcu-support1.3mf // support for the enclosure rigidity pt. 1
-
 │   ├── mcu-support2.3mf // support for the enclosure rigidity pt. 2
-
 ├── LICENSE
-
 ├── README.md
-
 ├── ink
-
 │   └── ink.ino // Arduino firmware code
-
 └── ink.FCStd // FreeCAD model of the enclosure
+```
 
 ## Hardware
 
