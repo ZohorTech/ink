@@ -6,7 +6,7 @@ MCU-based digital inclinometer
 
 ## Repository structure
 
-```shell
+```
 ├── 3mf
 │   ├── back.3mf // back cover for the enclosure
 │   ├── body.3mf // enclosure body
