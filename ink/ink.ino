@@ -12,6 +12,7 @@
 #define HOLD_TIME_MS          1500            // Hold duration (ms) for power off
 #define INACTIVITY_TIMEOUT_MS (10 * 60 * 1000UL) // 10 minutes auto-sleep timeout
 #define DISPLAY_UPDATE_MS     500             // 2 Hz non-blocking UI update rate
+#define MOTION_ANGLE_RESET    5.0f            // Reset 10-min countdown on 5° tilt change
 
 // Master 7x8 Crisp Solid Triangle Bitmap
 const uint8_t PROGMEM triangle_bmp[8] = {
@@ -294,7 +295,7 @@ void handleButton() {
   bool currentReading = (digitalRead(BUTTON_PIN) == HIGH);
 
   if (currentReading) {
-    lastActivityTime = millis();
+    lastActivityTime = millis(); // Resets timer on touch tap/hold
   }
 
   if (currentReading && !isPressed) {
@@ -313,15 +314,19 @@ void handleButton() {
 
     // Tap (>20ms, <1.5s): Zero baseline unit vector in RAM
     if (pressDuration >= 20 && pressDuration < HOLD_TIME_MS) {
-      imu.getSensorData();
-      float ax = imu.data.accelX;
-      float ay = imu.data.accelY;
-      float az = imu.data.accelZ;
-      float norm = sqrt(ax * ax + ay * ay + az * az);
+      float sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
+      for (int i = 0; i < 10; i++) {
+        imu.getSensorData();
+        sumX += imu.data.accelX;
+        sumY += imu.data.accelY;
+        sumZ += imu.data.accelZ;
+        delayMicroseconds(200);
+      }
+      float norm = sqrt(sumX * sumX + sumY * sumY + sumZ * sumZ);
       if (norm > 0.0001f) {
-        u0x = ax / norm;
-        u0y = ay / norm;
-        u0z = az / norm;
+        u0x = sumX / norm;
+        u0y = sumY / norm;
+        u0z = sumZ / norm;
       }
     }
   }
@@ -365,55 +370,69 @@ void loop() {
   if (currentMillis - lastDisplayUpdate >= DISPLAY_UPDATE_MS) {
     lastDisplayUpdate = currentMillis;
 
-    imu.getSensorData();
-    axRaw = imu.data.accelX;
-    ayRaw = imu.data.accelY;
-    azRaw = imu.data.accelZ;
-
-    // Motion detection for inactivity timer
-    static float lastAx = 0.0f, lastAy = 0.0f;
-    if (fabs(axRaw - lastAx) > 0.02f || fabs(ayRaw - lastAy) > 0.02f) {
-      lastActivityTime = currentMillis;
-      lastAx = axRaw;
-      lastAy = ayRaw;
+    // 10x Over-sampling to eliminate electrical noise
+    float sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
+    for (int i = 0; i < 10; i++) {
+      imu.getSensorData();
+      sumX += imu.data.accelX;
+      sumY += imu.data.accelY;
+      sumZ += imu.data.accelZ;
+      delayMicroseconds(200);
     }
 
-    if (currentMillis - lastActivityTime >= INACTIVITY_TIMEOUT_MS) {
-      enterPowerOff();
-    }
+    axRaw = sumX / 10.0f;
+    ayRaw = sumY / 10.0f;
+    azRaw = sumZ / 10.0f;
 
     // Current normalized 3D gravity unit vector
     float norm = sqrt(axRaw * axRaw + ayRaw * ayRaw + azRaw * azRaw);
     float rawAngleDeg = 0.0f;
-    float crossX = 0.0f, crossY = 0.0f, crossZ = 0.0f;
+    float crossZ = 0.0f;
 
     if (norm > 0.0001f) {
       float ux = axRaw / norm;
       float uy = ayRaw / norm;
       float uz = azRaw / norm;
 
-      // Dot product and cross product for smooth 0-180 degree continuous angle
       float dot = ux * u0x + uy * u0y + uz * u0z;
-      crossX = u0y * uz - u0z * uy;
-      crossY = u0z * ux - u0x * uz;
-      crossZ = u0x * uy - u0y * ux;
+      float crossX = u0y * uz - u0z * uy;
+      float crossY = u0z * ux - u0x * uz;
+      crossZ       = u0x * uy - u0y * ux;
       float crossMag = sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
 
       rawAngleDeg = atan2(crossMag, dot) * 180.0f / M_PI;
     }
 
-    // Adaptive threshold filter: Snap instantly on motion (>0.15°), smooth lightly when still
-    static float smoothedAngle = -999.0f;
-    if (smoothedAngle < -900.0f || fabs(rawAngleDeg - smoothedAngle) > 0.15f) {
-      smoothedAngle = rawAngleDeg;
-    } else {
-      smoothedAngle = (smoothedAngle * 0.2f) + (rawAngleDeg * 0.8f);
+    // Motion Detection for Inactivity Timeout (5.0° change threshold)
+    static float lastActivityAngle = -999.0f;
+    if (lastActivityAngle < -900.0f) {
+      lastActivityAngle = rawAngleDeg;
+    } else if (fabs(rawAngleDeg - lastActivityAngle) >= MOTION_ANGLE_RESET) {
+      lastActivityTime = currentMillis;
+      lastActivityAngle = rawAngleDeg;
     }
 
-    float displayAngle = smoothedAngle;
+    if (currentMillis - lastActivityTime >= INACTIVITY_TIMEOUT_MS) {
+      enterPowerOff();
+    }
+
+    // Deadband Hysteresis Filter: Holds 0.01° solid when still, snaps instantly on motion
+    static float stableAngle = -999.0f;
+    if (stableAngle < -900.0f) {
+      stableAngle = rawAngleDeg;
+    } else {
+      float diff = rawAngleDeg - stableAngle;
+      if (fabs(diff) > 0.05f) {
+        stableAngle = rawAngleDeg; // Instant snap on deliberate tilt
+      } else if (fabs(diff) > 0.015f) {
+        stableAngle += diff * 0.4f; // Smooth transition on gentle movement
+      }
+    }
+
+    float displayAngle = stableAngle;
     bool flipDisplay = false;
 
-    // Strict 0.00° to 90.00° range mapping + 180° screen rotation when past 90°
+    // Strict 0.00° to 90.00° range mapping + 180° screen rotation past 90°
     if (displayAngle > 90.0f) {
       displayAngle = 180.0f - displayAngle;
       flipDisplay = true;
@@ -454,7 +473,7 @@ void loop() {
     display.setCursor(textStartX, 22);
     display.print(tiltBuf);
 
-    // Degree symbol shifted right to x=112
+    // Degree symbol fixed at x=112
     display.drawCircle(112, 24, 2, SH110X_WHITE);
 
     display.display();
